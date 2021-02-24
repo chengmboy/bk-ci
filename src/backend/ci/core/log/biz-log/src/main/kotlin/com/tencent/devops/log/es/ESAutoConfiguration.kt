@@ -59,6 +59,7 @@ import org.springframework.core.Ordered
 import java.io.File
 import java.io.FileInputStream
 import java.security.KeyStore
+import java.security.SecureRandom
 import javax.net.ssl.SSLContext
 
 @Configuration
@@ -108,35 +109,32 @@ class ESAutoConfiguration : DisposableBean {
             throw IllegalArgumentException("name of elasticsearch not config: log.elasticsearch.name")
         }
 
-        var httpHost = HttpHost(ip, port ?: 9200, "http")
-        var sslContext: SSLContext? = null
-
         // 基础鉴权 - 账号密码
         val credentialsProvider = if (!username.isNullOrBlank() || !password.isNullOrBlank()) {
             if (username.isNullOrBlank()) {
-                throw IllegalArgumentException("credentials config invaild: log.elasticsearch.username")
+                throw IllegalArgumentException("credentials config invalid: log.elasticsearch.username")
             }
             if (password.isNullOrBlank()) {
-                throw IllegalArgumentException("credentials config invaild: log.elasticsearch.password")
+                throw IllegalArgumentException("credentials config invalid: log.elasticsearch.password")
             }
             val provider = BasicCredentialsProvider()
             provider.setCredentials(AuthScope.ANY, UsernamePasswordCredentials(username, password))
             provider
         } else null
 
-        // HTTPS鉴权 - SSL证书
-        if (enableSSL(https)) {
+        // SSL证书配置
+        val sslContext = if (hasCertificateConfig()) {
             if (keystoreFilePath.isNullOrBlank()) {
-                throw IllegalArgumentException("SearchGuard config invaild: log.elasticsearch.keystore.filePath")
+                throw IllegalArgumentException("SearchGuard config invalid: log.elasticsearch.keystore.filePath")
             }
             if (truststoreFilePath.isNullOrBlank()) {
-                throw IllegalArgumentException("SearchGuard  config invaild: log.elasticsearch.keystore.password")
+                throw IllegalArgumentException("SearchGuard  config invalid: log.elasticsearch.keystore.password")
             }
             if (keystorePassword.isNullOrBlank()) {
-                throw IllegalArgumentException("SearchGuard config invaild: log.elasticsearch.truststore.filePath")
+                throw IllegalArgumentException("SearchGuard config invalid: log.elasticsearch.truststore.filePath")
             }
             if (truststorePassword.isNullOrBlank()) {
-                throw IllegalArgumentException("SearchGuard config invaild: log.elasticsearch.truststore.password")
+                throw IllegalArgumentException("SearchGuard config invalid: log.elasticsearch.truststore.password")
             }
 
             val keystoreFile = File(keystoreFilePath!!)
@@ -155,17 +153,27 @@ class ESAutoConfiguration : DisposableBean {
             val truststorePasswordCharArray = truststorePassword!!.toCharArray()
             truststore.load(FileInputStream(truststoreFile), truststorePasswordCharArray)
 
-            httpHost = HttpHost(ip, port ?: 9200, "https")
-            sslContext = SSLContexts.custom()
+            SSLContexts.custom()
                 .loadTrustMaterial(truststore, null)
                 .loadKeyMaterial(keyStore, keystorePasswordCharArray)
                 .build()
-        }
+        } else null
+
+        val httpHost = HttpHost(ip!!, port!!, if (boolConvert(https)) "https" else "http")
 
         // 初始化 RestClient 配置
         val builder = RestClient.builder(httpHost)
         builder.setHttpClientConfigCallback { httpClientBuilder ->
-            if (sslContext != null) httpClientBuilder.setSSLContext(sslContext)
+            if (boolConvert(https)) {
+                if (sslContext != null) {
+                    httpClientBuilder.setSSLContext(sslContext)
+                } else {
+                    val defaultContext = SSLContext.getInstance("SSL", "SunJSSE")
+                    defaultContext.init(null, arrayOf(NormalX509ExtendedTrustManager.INSTANCE), SecureRandom())
+                    httpClientBuilder.setSSLHostnameVerifier { _, _ -> true }
+                    httpClientBuilder.setSSLContext(defaultContext)
+                }
+            }
             if (credentialsProvider != null) httpClientBuilder.setDefaultCredentialsProvider(credentialsProvider)
             httpClientBuilder
         }
@@ -207,11 +215,18 @@ class ESAutoConfiguration : DisposableBean {
         client?.close()
     }
 
-    private fun enableSSL(https: String?): Boolean {
-        return if (!https.isNullOrBlank()) {
-            https!!.toBoolean()
+    private fun boolConvert(value: String?): Boolean {
+        return if (!value.isNullOrBlank()) {
+            value!!.toBoolean()
         } else {
             false
         }
+    }
+
+    private fun hasCertificateConfig(): Boolean {
+        return !keystoreFilePath.isNullOrBlank() ||
+            !truststoreFilePath.isNullOrBlank() ||
+            !keystorePassword.isNullOrBlank() ||
+            !truststorePassword.isNullOrBlank()
     }
 }
